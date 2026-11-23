@@ -25,7 +25,7 @@ class AtomStore:
         cur.executescript(
             """
             CREATE TABLE IF NOT EXISTS atoms (
-                atom_id   TEXT PRIMARY KEY,
+                atom_id   TEXT PRIMARY PRIMARY KEY,
                 content   TEXT NOT NULL,
                 modality  TEXT,
                 confidence REAL,
@@ -38,7 +38,8 @@ class AtomStore:
                 USING fts5(content, content='atoms', content_rowid='rowid');
             """
         )
-        # Triggers: recreate safely
+        # Recreate triggers and rebuild the external-content index to repair drift
+        # caused by older versions or interrupted trigger maintenance.
         cur.execute("DROP TRIGGER IF EXISTS atoms_ai")
         cur.execute("DROP TRIGGER IF EXISTS atoms_ad")
         cur.execute("DROP TRIGGER IF EXISTS atoms_au")
@@ -58,46 +59,55 @@ class AtomStore:
             END;
             """
         )
+        cur.execute("INSERT INTO atoms_fts(atoms_fts) VALUES ('rebuild')")
         self._conn.commit()
 
     def add(self, atoms: List[Atom]) -> None:
-        """Insert or replace (supports pin/forget metadata updates)."""
-        cur = self._conn.cursor()
-        for a in atoms:
-            cur.execute(
-                """
-                INSERT INTO atoms
-                (atom_id, content, modality, confidence, source_session, timestamp, provenance, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(atom_id) DO UPDATE SET
-                    content=excluded.content,
-                    modality=excluded.modality,
-                    confidence=excluded.confidence,
-                    source_session=excluded.source_session,
-                    timestamp=excluded.timestamp,
-                    provenance=excluded.provenance,
-                    metadata=excluded.metadata
-                """,
-                (
-                    a.atom_id,
-                    a.content,
-                    a.modality,
-                    a.confidence,
-                    a.source_session,
-                    a.timestamp.isoformat(),
-                    json.dumps(a.provenance),
-                    json.dumps(a.metadata),
-                ),
-            )
-        self._conn.commit()
+        """Atomically insert or replace a batch (supports pin/forget updates)."""
+        with self._conn:
+            cur = self._conn.cursor()
+            for a in atoms:
+                cur.execute(
+                    """
+                    INSERT INTO atoms
+                    (atom_id, content, modality, confidence, source_session, timestamp, provenance, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(atom_id) DO UPDATE SET
+                        content=excluded.content,
+                        modality=excluded.modality,
+                        confidence=excluded.confidence,
+                        source_session=excluded.source_session,
+                        timestamp=excluded.timestamp,
+                        provenance=excluded.provenance,
+                        metadata=excluded.metadata
+                    """,
+                    (
+                        a.atom_id,
+                        a.content,
+                        a.modality,
+                        a.confidence,
+                        a.source_session,
+                        a.timestamp.isoformat(),
+                        json.dumps(a.provenance),
+                        json.dumps(a.metadata),
+                    ),
+                )
 
     def search(self, query: str, limit: int = 20) -> List[Atom]:
+        if not isinstance(query, str):
+            raise TypeError("query must be a string")
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise TypeError("limit must be an integer")
+        if limit <= 0:
+            return []
         cur = self._conn.cursor()
+        # Quote each token and escape embedded quotes so user text cannot alter
+        # the FTS expression. Empty/whitespace-only searches return no results.
+        tokens = query.split()
+        safe = " ".join('"{}"'.format(t.replace('"', '""')) for t in tokens)
+        if not safe:
+            return []
         try:
-            # Quote tokens for FTS5 safety
-            safe = " ".join(f'"{t}"' for t in query.split() if t)
-            if not safe:
-                return []
             rows = cur.execute(
                 """
                 SELECT a.* FROM atoms_fts f
@@ -115,8 +125,7 @@ class AtomStore:
         return [self._row_to_atom(r) for r in rows]
 
     def all_atoms(self) -> List[Atom]:
-        cur = self._conn.cursor()
-        rows = cur.execute("SELECT * FROM atoms").fetchall()
+        rows = self._conn.execute("SELECT * FROM atoms").fetchall()
         return [self._row_to_atom(r) for r in rows]
 
     def _row_to_atom(self, row: sqlite3.Row) -> Atom:
