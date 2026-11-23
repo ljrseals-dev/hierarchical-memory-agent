@@ -23,21 +23,34 @@ class Hierarchy:
             self.atoms[a.atom_id] = a
 
     def build_levels(self, max_level: int = 3, max_groups: int = 8) -> None:
-        """Iterate coarsening to produce L1 … L_max."""
+        """Iterate coarsening to produce L1 … L_max with progressive compression."""
+        self.levels.clear()
+        self.edges.clear()
         if not self.atoms:
             return
-        current: Sequence = list(self.atoms.values())
+
+        # Only use non-forgotten atoms for hierarchy construction
+        current: Sequence = [
+            a for a in self.atoms.values() if not a.metadata.get("forgotten")
+        ]
+        if not current:
+            return
+
         for level in range(1, max_level + 1):
             reps = coarsen(current, level=level, max_groups=max_groups)
+            if not reps:
+                break
             self.levels[level] = reps
             for r in reps:
                 self.edges[r.rep_id] = list(r.child_ids)
             # next iteration coarsens the representatives themselves
-            # (treat them as pseudo-atoms for the next π/ρ)
             current = [
                 Atom(content=r.content, atom_id=r.rep_id, metadata={"level": level})
                 for r in reps
             ]
+            # stop early if we already have a single root-like group
+            if len(reps) <= 1:
+                break
 
     def children_of(self, node_id: str) -> List[str]:
         return self.edges.get(node_id, [])
@@ -50,3 +63,10 @@ class Hierarchy:
         for lvl in sorted(self.levels.keys()):
             out.extend(self.levels[lvl])
         return out
+
+    def stats(self) -> dict:
+        return {
+            "n_atoms": len(self.atoms),
+            "n_active": sum(1 for a in self.atoms.values() if not a.metadata.get("forgotten")),
+            "levels": {k: len(v) for k, v in self.levels.items()},
+        }

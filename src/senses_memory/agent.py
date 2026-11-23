@@ -27,6 +27,7 @@ class MemoryAgent:
         self.hierarchy = Hierarchy()
         self.max_levels = max_levels
         self.default_budget = default_budget
+        self._traversal_log: list[dict] = []  # for self-improvement loop
         # load any existing atoms
         existing = self.store.all_atoms()
         if existing:
@@ -46,7 +47,6 @@ class MemoryAgent:
         atoms = extract(experience, source_session=source_session, modality=modality)
         self.store.add(atoms)
         self.hierarchy.add_atoms(atoms)
-        # rebuild hierarchy (simple incremental strategy for v0.1)
         self.hierarchy.build_levels(max_level=self.max_levels)
         return atoms
 
@@ -56,7 +56,6 @@ class MemoryAgent:
 
     def on_session_end(self) -> None:
         """Crystallise session atoms into the persistent hierarchy."""
-        # already persisted on every write; rebuild is enough for v0.1
         self.hierarchy.build_levels(max_level=self.max_levels)
 
     # ----- Hermes-style tools -----
@@ -68,19 +67,39 @@ class MemoryAgent:
         mode: TraversalMode = TraversalMode.TOP_DOWN,
     ) -> TraversalResult:
         """τ — retrieve atoms under a token budget."""
-        return traverse(
+        result = traverse(
             self.hierarchy,
             query,
             budget=budget or self.default_budget,
             mode=mode,
         )
+        # Self-improvement signal: log low-yield traversals
+        n_atoms = len(self.hierarchy.atoms)
+        yield_ratio = len(result.atoms) / max(1, n_atoms)
+        self._traversal_log.append(
+            {
+                "query": query,
+                "mode": mode.value,
+                "selected": len(result.atoms),
+                "budget_used": result.budget_used,
+                "yield_ratio": yield_ratio,
+            }
+        )
+        return result
 
     def memory_expand(self, rep_or_atom_id: str) -> List[Atom]:
         """Expand a representative or return a single atom."""
         if rep_or_atom_id in self.hierarchy.atoms:
-            return [self.hierarchy.atoms[rep_or_atom_id]]
+            atom = self.hierarchy.atoms[rep_or_atom_id]
+            if atom.metadata.get("forgotten"):
+                return []
+            return [atom]
         child_ids = self.hierarchy.children_of(rep_or_atom_id)
-        return [self.hierarchy.atoms[cid] for cid in child_ids if cid in self.hierarchy.atoms]
+        return [
+            self.hierarchy.atoms[cid]
+            for cid in child_ids
+            if cid in self.hierarchy.atoms and not self.hierarchy.atoms[cid].metadata.get("forgotten")
+        ]
 
     def memory_pin(self, atom_id: str) -> bool:
         """Mark an atom as high-priority (stored in metadata)."""
@@ -98,6 +117,8 @@ class MemoryAgent:
             return False
         atom.metadata["forgotten"] = True
         self.store.add([atom])
+        # Rebuild so forgotten atoms leave the hierarchy routing structure
+        self.hierarchy.build_levels(max_level=self.max_levels)
         return True
 
     def memory_reason(self, query: str, budget: Optional[int] = None) -> str:
@@ -107,6 +128,19 @@ class MemoryAgent:
             return "No relevant memory found."
         lines = [f"- {a.content}" for a in result.atoms]
         return "Relevant memory:\n" + "\n".join(lines)
+
+    def review_traversal_failures(self, min_yield: float = 0.05) -> list[dict]:
+        """Self-improvement loop (Hermes trait): surface low-yield queries.
+
+        Callers can use this to decide whether to re-cluster / re-summarise
+        a region of the hierarchy.
+        """
+        return [e for e in self._traversal_log if e["yield_ratio"] < min_yield]
+
+    def stats(self) -> dict:
+        s = self.hierarchy.stats()
+        s["traversal_log_size"] = len(self._traversal_log)
+        return s
 
     def close(self) -> None:
         self.store.close()

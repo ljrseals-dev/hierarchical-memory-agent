@@ -1,13 +1,49 @@
-"""Smoke tests for the (α, C, τ) pipeline."""
+"""Tests for the (α, C, τ) pipeline — Boy Scouts hardened."""
 
 from senses_memory import extract, MemoryAgent
 from senses_memory.traversal import TraversalMode
+from senses_memory.coarsening import coarsen
+from senses_memory.hierarchy import Hierarchy
+from senses_memory.atoms import Atom
 
 
 def test_extraction_produces_atoms():
     atoms = extract("The system must remain offline-first. Cost tracking is mandatory.")
     assert len(atoms) >= 1
     assert all(a.content for a in atoms)
+    assert all(a.atom_id for a in atoms)
+
+
+def test_extraction_preserves_dense_propositions():
+    text = "Ship mode requires evidence. Explore mode is fast."
+    atoms = extract(text)
+    assert len(atoms) >= 2
+
+
+def test_coarsen_produces_representatives():
+    atoms = extract(
+        "Verification modes are Explore Build and Ship. "
+        "Cost tracking is first-class. Offline reliability is required."
+    )
+    reps = coarsen(atoms, level=1, max_groups=4)
+    assert len(reps) >= 1
+    assert all(r.content for r in reps)
+    assert all(r.child_ids for r in reps)
+
+
+def test_hierarchy_progressive_compression():
+    atoms = extract(
+        "Alpha extracts atoms. Coarsening builds hierarchy. Traversal selects under budget. "
+        "Pinned atoms are preferred. Forgotten atoms are excluded. Offline first is the rule."
+    )
+    h = Hierarchy()
+    h.add_atoms(atoms)
+    h.build_levels(max_level=3, max_groups=6)
+    stats = h.stats()
+    assert stats["n_atoms"] == len(atoms)
+    # Higher levels should not explode in size
+    if 1 in h.levels and 2 in h.levels:
+        assert len(h.levels[2]) <= len(h.levels[1]) + 1
 
 
 def test_agent_end_to_end():
@@ -16,4 +52,55 @@ def test_agent_end_to_end():
     agent.on_memory_write("All memory operations are compositions of alpha, C, and tau.")
     result = agent.memory_search("verification", mode=TraversalMode.TOP_DOWN)
     assert isinstance(result.atoms, list)
+    agent.close()
+
+
+def test_forgotten_atoms_excluded_from_traversal():
+    agent = MemoryAgent(db_path=":memory:", max_levels=2, default_budget=200)
+    atoms = agent.on_memory_write(
+        "Secret credential is never stored. Public preference is dark mode."
+    )
+    # forget the first atom
+    target = atoms[0]
+    assert agent.memory_forget(target.atom_id)
+    result = agent.memory_search("Secret credential dark mode", budget=200)
+    contents = [a.content for a in result.atoms]
+    assert target.content not in contents
+    agent.close()
+
+
+def test_pinned_atoms_preferred():
+    agent = MemoryAgent(db_path=":memory:", max_levels=2, default_budget=30)
+    a1 = agent.on_memory_write("Low priority note about the weather today.")
+    a2 = agent.on_memory_write("Critical: verification modes are Explore Build Ship.")
+    agent.memory_pin(a2[0].atom_id)
+    result = agent.memory_search("verification weather modes", budget=15)
+    # With tight budget, pinned critical atom should appear
+    ids = {a.atom_id for a in result.atoms}
+    assert a2[0].atom_id in ids
+    agent.close()
+
+
+def test_memory_reason_returns_text():
+    agent = MemoryAgent(db_path=":memory:", max_levels=2, default_budget=80)
+    agent.on_memory_write("Ship requires evidence before marking a task done.")
+    text = agent.memory_reason("evidence")
+    assert "Relevant memory" in text or "Ship" in text
+    agent.close()
+
+
+def test_self_improvement_log():
+    agent = MemoryAgent(db_path=":memory:", max_levels=2, default_budget=50)
+    agent.on_memory_write("Something about cats and dogs.")
+    agent.memory_search("completely unrelated quantum chromodynamics")
+    failures = agent.review_traversal_failures(min_yield=0.5)
+    assert isinstance(failures, list)
+    agent.close()
+
+
+def test_stats():
+    agent = MemoryAgent(db_path=":memory:", max_levels=2, default_budget=50)
+    agent.on_memory_write("One fact. Two fact.")
+    s = agent.stats()
+    assert s["n_atoms"] >= 1
     agent.close()
