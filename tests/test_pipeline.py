@@ -104,3 +104,49 @@ def test_stats():
     s = agent.stats()
     assert s["n_atoms"] >= 1
     agent.close()
+
+
+
+def test_partition_never_exceeds_max_groups():
+    atoms = [
+        Atom(content=f"Topic{i} contains a sufficiently long proposition.", atom_id=f"a{i}")
+        for i in range(12)
+    ]
+    reps = coarsen(atoms, level=1, max_groups=3)
+    assert len(reps) <= 3
+    assert {child for rep in reps for child in rep.child_ids} == {a.atom_id for a in atoms}
+
+
+def test_memory_expand_recursively_reaches_original_atoms():
+    agent = MemoryAgent(db_path=":memory:", max_levels=3, default_budget=200)
+    atoms = agent.on_memory_write(
+        [
+            "Alpha extraction stores atomic propositions with complete provenance.",
+            "Beta traversal selects relevant memories under a strict token budget.",
+            "Gamma coarsening groups propositions into durable semantic summaries.",
+            "Delta persistence retains original atoms across application restarts.",
+        ]
+    )
+    highest_level = max(agent.hierarchy.levels)
+    root = agent.hierarchy.levels[highest_level][0]
+    expanded = agent.memory_expand(root.rep_id)
+    assert {a.atom_id for a in expanded} == {a.atom_id for a in atoms}
+    agent.close()
+
+
+def test_explicit_zero_budget_is_not_replaced_by_default():
+    agent = MemoryAgent(db_path=":memory:", max_levels=2, default_budget=100)
+    agent.on_memory_write("A sufficiently long memory proposition for retrieval.")
+    result = agent.memory_search("memory", budget=0)
+    assert result.atoms == []
+    assert result.budget_used == 0
+    agent.close()
+
+
+def test_extraction_rejects_invalid_confidence_and_items():
+    import pytest
+
+    with pytest.raises(ValueError):
+        extract("A sufficiently long proposition.", confidence=1.5)
+    with pytest.raises(TypeError):
+        extract(["A sufficiently long proposition.", 42])
