@@ -25,7 +25,7 @@ class AtomStore:
         cur.executescript(
             """
             CREATE TABLE IF NOT EXISTS atoms (
-                atom_id   TEXT PRIMARY PRIMARY KEY,
+                atom_id   TEXT PRIMARY KEY,
                 content   TEXT NOT NULL,
                 modality  TEXT,
                 confidence REAL,
