@@ -128,8 +128,12 @@ def test_memory_expand_recursively_reaches_original_atoms():
         ]
     )
     highest_level = max(agent.hierarchy.levels)
-    root = agent.hierarchy.levels[highest_level][0]
-    expanded = agent.memory_expand(root.rep_id)
+    roots = agent.hierarchy.levels[highest_level]
+    expanded = [
+        atom
+        for root in roots
+        for atom in agent.memory_expand(root.rep_id)
+    ]
     assert {a.atom_id for a in expanded} == {a.atom_id for a in atoms}
     agent.close()
 
