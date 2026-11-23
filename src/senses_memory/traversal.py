@@ -94,7 +94,13 @@ def _top_down(h: Hierarchy, query: str, budget: int) -> TraversalResult:
             continue
         visited.add(node_id)
         children = h.children_of(node_id)
-        atom_children = [cid for cid in children if cid in eligible]
+        atom_children = sorted(
+            (cid for cid in children if cid in eligible),
+            key=lambda aid: _relevance(
+                query, eligible[aid].content, pinned=_is_pinned(eligible[aid])
+            ),
+            reverse=True,
+        )
         for aid in atom_children:
             if used >= budget:
                 break
