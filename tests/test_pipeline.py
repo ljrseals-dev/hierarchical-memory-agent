@@ -154,3 +154,47 @@ def test_extraction_rejects_invalid_confidence_and_items():
         extract("A sufficiently long proposition.", confidence=1.5)
     with pytest.raises(TypeError):
         extract(["A sufficiently long proposition.", 42])
+
+def test_collapsed_traversal_paths_remain_aligned_after_pinned_sort():
+    agent = MemoryAgent(db_path=":memory:", max_levels=3, default_budget=500)
+    atoms = agent.on_memory_write([
+        "Alpha topic covers hierarchy traversal and evidence preservation.",
+        "Bravo topic covers SQLite persistence and atomic writes.",
+        "Charlie topic covers pinned memories and retrieval budgets.",
+        "Delta topic covers FTS indexing and keyword search.",
+        "Echo topic covers traversal paths and representative expansion.",
+        "Foxtrot topic covers forgotten records and soft deletion.",
+        "Golf topic covers offline-first configuration and operation.",
+        "Hotel topic covers extraction confidence and provenance.",
+    ])
+    agent.memory_pin(atoms[-1].atom_id)
+    result = agent.memory_search("topic traversal persistence", budget=500, mode=TraversalMode.COLLAPSED)
+    assert len(result.atoms) == len(result.paths)
+    assert all(path[-1] == atom.atom_id for atom, path in zip(result.atoms, result.paths))
+    agent.close()
+
+
+def test_atom_store_rebuilds_search_index_on_reopen():
+    import tempfile
+    from senses_memory.store import AtomStore
+
+    with tempfile.NamedTemporaryFile(suffix=".sqlite") as tmp:
+        store = AtomStore(tmp.name)
+        store.add(extract("Durable index rebuild should preserve searchability after restart."))
+        store.close()
+        reopened = AtomStore(tmp.name)
+        assert reopened.search("searchability")
+        reopened.close()
+
+
+def test_atom_batch_rolls_back_on_serialization_failure():
+    import pytest
+    from senses_memory.store import AtomStore
+
+    store = AtomStore(":memory:")
+    valid = Atom(content="First valid item", atom_id="valid")
+    invalid = Atom(content="Second item", atom_id="invalid", metadata={"bad": object()})
+    with pytest.raises(TypeError):
+        store.add([valid, invalid])
+    assert store.all_atoms() == []
+    store.close()

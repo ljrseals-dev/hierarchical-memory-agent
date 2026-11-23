@@ -35,10 +35,7 @@ def _relevance(query: str, text: str, *, pinned: bool = False) -> float:
     """Cheap offline relevance score (token overlap). Pinned atoms get a boost."""
     q = set(query.lower().split())
     t = set(text.lower().split())
-    if not q:
-        base = 0.0
-    else:
-        base = len(q & t) / len(q)
+    base = len(q & t) / len(q) if q else 0.0
     if pinned:
         base += 0.35
     return base
@@ -57,12 +54,17 @@ def traverse(
     """τ — Traversal operator.
 
     Selects a subset of atoms under a token budget, using the hierarchy
-    to avoid flat retrieval over all atoms.
-    Forgotten atoms are excluded. Pinned atoms are preferentially retained.
+    to avoid flat retrieval over all atoms. Forgotten atoms are excluded.
     """
+    if isinstance(budget, bool) or not isinstance(budget, int):
+        raise TypeError("budget must be an integer")
+    if budget < 0:
+        raise ValueError("budget cannot be negative")
     if mode == TraversalMode.TOP_DOWN:
         return _top_down(hierarchy, query, budget)
-    return _collapsed(hierarchy, query, budget)
+    if mode == TraversalMode.COLLAPSED:
+        return _collapsed(hierarchy, query, budget)
+    raise ValueError(f"unsupported traversal mode: {mode!r}")
 
 
 def _eligible_atoms(h: Hierarchy) -> dict[str, Atom]:
@@ -70,7 +72,6 @@ def _eligible_atoms(h: Hierarchy) -> dict[str, Atom]:
 
 
 def _top_down(h: Hierarchy, query: str, budget: int) -> TraversalResult:
-    """Start at coarsest level, route via representatives, expand promising branches."""
     selected: List[Atom] = []
     paths: List[List[str]] = []
     used = 0
@@ -84,9 +85,7 @@ def _top_down(h: Hierarchy, query: str, budget: int) -> TraversalResult:
     candidates: list[tuple[float, str, list[str]]] = []
     top = levels[0]
     for rep in h.levels.get(top, []):
-        score = _relevance(query, rep.content)
-        candidates.append((score, rep.rep_id, [rep.rep_id]))
-
+        candidates.append((_relevance(query, rep.content), rep.rep_id, [rep.rep_id]))
     candidates.sort(key=lambda x: x[0], reverse=True)
 
     while candidates and used < budget:
@@ -94,54 +93,45 @@ def _top_down(h: Hierarchy, query: str, budget: int) -> TraversalResult:
         if node_id in visited:
             continue
         visited.add(node_id)
-
         children = h.children_of(node_id)
-        if not children:
-            continue
+        atom_children = sorted(
+            (cid for cid in children if cid in eligible),
+            key=lambda aid: _relevance(
+                query, eligible[aid].content, pinned=_is_pinned(eligible[aid])
+            ),
+            reverse=True,
+        )
+        for aid in atom_children:
+            if used >= budget:
+                break
+            atom = eligible[aid]
+            cost = _token_estimate(atom.content)
+            if used + cost > budget:
+                continue
+            selected.append(atom)
+            paths.append(path + [aid])
+            used += cost
+        for cid in children:
+            if cid in eligible:
+                continue
+            text = cid
+            for reps in h.levels.values():
+                for r in reps:
+                    if r.rep_id == cid:
+                        text = r.content
+                        break
+            candidates.append((_relevance(query, text), cid, path + [cid]))
+        candidates.sort(key=lambda x: x[0], reverse=True)
 
-        atom_children = [cid for cid in children if cid in eligible]
-        if atom_children:
-            ranked = sorted(
-                atom_children,
-                key=lambda aid: _relevance(
-                    query, eligible[aid].content, pinned=_is_pinned(eligible[aid])
-                ),
-                reverse=True,
-            )
-            for aid in ranked:
-                if used >= budget:
-                    break
-                atom = eligible[aid]
-                cost = _token_estimate(atom.content)
-                if used + cost > budget:
-                    continue
-                selected.append(atom)
-                paths.append(path + [aid])
-                used += cost
-        else:
-            for cid in children:
-                text = cid
-                for reps in h.levels.values():
-                    for r in reps:
-                        if r.rep_id == cid:
-                            text = r.content
-                            break
-                s = _relevance(query, text)
-                candidates.append((s, cid, path + [cid]))
-            candidates.sort(key=lambda x: x[0], reverse=True)
-
-    return TraversalResult(
-        atoms=selected, paths=paths, budget_used=used, mode=TraversalMode.TOP_DOWN
-    )
+    return TraversalResult(atoms=selected, paths=paths, budget_used=used, mode=TraversalMode.TOP_DOWN)
 
 
 def _collapsed(h: Hierarchy, query: str, budget: int) -> TraversalResult:
-    """Search representatives across levels in parallel, then expand selectively."""
     eligible = _eligible_atoms(h)
     scored: list[tuple[float, str, object]] = []
-    for level, reps in h.levels.items():
-        for r in reps:
-            scored.append((_relevance(query, r.content), r.rep_id, r))
+    for reps in h.levels.values():
+        for rep in reps:
+            scored.append((_relevance(query, rep.content), rep.rep_id, rep))
     scored.sort(key=lambda x: x[0], reverse=True)
 
     selected: List[Atom] = []
@@ -149,35 +139,39 @@ def _collapsed(h: Hierarchy, query: str, budget: int) -> TraversalResult:
     used = 0
     seen: Set[str] = set()
 
-    for score, _rid, rep in scored:
+    for _score, _rid, rep in scored:
         if used >= budget:
             break
-        stack = list(rep.child_ids)
-        path_prefix = [rep.rep_id]
+        # Carry the complete hierarchy path while walking descendants.
+        stack = [(child_id, [rep.rep_id, child_id]) for child_id in reversed(rep.child_ids)]
         while stack and used < budget:
-            nid = stack.pop()
-            if nid in eligible and nid not in seen:
-                atom = eligible[nid]
+            node_id, path = stack.pop()
+            if node_id in eligible:
+                if node_id in seen:
+                    continue
+                atom = eligible[node_id]
                 cost = _token_estimate(atom.content)
                 if used + cost > budget:
                     continue
                 selected.append(atom)
-                paths.append(path_prefix + [nid])
+                paths.append(path)
                 used += cost
-                seen.add(nid)
-            else:
-                stack.extend(h.children_of(nid))
+                seen.add(node_id)
+                continue
+            children = h.children_of(node_id)
+            stack.extend((cid, path + [cid]) for cid in reversed(children))
 
-    # Prefer pinned atoms if we still have budget headroom (re-rank final list)
-    selected.sort(
-        key=lambda a: (
-            0 if _is_pinned(a) else 1,
-            -_relevance(query, a.content, pinned=_is_pinned(a)),
-        )
+    # Sort atoms and their paths together so the result stays aligned.
+    paired = sorted(
+        zip(selected, paths),
+        key=lambda pair: (
+            0 if _is_pinned(pair[0]) else 1,
+            -_relevance(query, pair[0].content, pinned=_is_pinned(pair[0])),
+        ),
     )
-    return TraversalResult(
-        atoms=selected, paths=paths, budget_used=used, mode=TraversalMode.COLLAPSED
-    )
+    selected = [atom for atom, _path in paired]
+    paths = [path for _atom, path in paired]
+    return TraversalResult(atoms=selected, paths=paths, budget_used=used, mode=TraversalMode.COLLAPSED)
 
 
 def _flat(h: Hierarchy, query: str, budget: int) -> TraversalResult:
