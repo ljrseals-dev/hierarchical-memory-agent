@@ -70,7 +70,7 @@ class MemoryAgent:
         result = traverse(
             self.hierarchy,
             query,
-            budget=budget or self.default_budget,
+            budget=self.default_budget if budget is None else budget,
             mode=mode,
         )
         # Self-improvement signal: log low-yield traversals
@@ -94,12 +94,23 @@ class MemoryAgent:
             if atom.metadata.get("forgotten"):
                 return []
             return [atom]
-        child_ids = self.hierarchy.children_of(rep_or_atom_id)
-        return [
-            self.hierarchy.atoms[cid]
-            for cid in child_ids
-            if cid in self.hierarchy.atoms and not self.hierarchy.atoms[cid].metadata.get("forgotten")
-        ]
+        # Representatives can point to other representatives at higher levels.
+        # Expand recursively so callers always receive the original V₀ atoms.
+        found: List[Atom] = []
+        pending = [rep_or_atom_id]
+        visited: set[str] = set()
+        while pending:
+            node_id = pending.pop()
+            if node_id in visited:
+                continue
+            visited.add(node_id)
+            atom = self.hierarchy.atoms.get(node_id)
+            if atom is not None:
+                if not atom.metadata.get("forgotten"):
+                    found.append(atom)
+                continue
+            pending.extend(reversed(self.hierarchy.children_of(node_id)))
+        return found
 
     def memory_pin(self, atom_id: str) -> bool:
         """Mark an atom as high-priority (stored in metadata)."""
