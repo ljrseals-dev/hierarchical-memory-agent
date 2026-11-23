@@ -43,11 +43,23 @@ def extract(
     if isinstance(experience, str):
         texts = [experience]
     else:
-        texts = list(experience)
+        try:
+            texts = list(experience)
+        except TypeError as exc:
+            raise TypeError("experience must be a string or iterable of strings") from exc
+
+    if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
+        raise TypeError("confidence must be a number between 0 and 1")
+    if not 0.0 <= float(confidence) <= 1.0:
+        raise ValueError("confidence must be between 0 and 1")
+    if not isinstance(modality, str) or not modality.strip():
+        raise ValueError("modality must be a non-empty string")
 
     atoms: List[Atom] = []
-    prov = provenance or {}
+    prov = dict(provenance or {})
     for text in texts:
+        if not isinstance(text, str):
+            raise TypeError("every experience item must be a string")
         for prop in _split_into_propositions(text):
             atoms.append(
                 Atom(
