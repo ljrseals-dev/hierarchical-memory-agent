@@ -1,0 +1,25 @@
+# Operator configuration for 5-Senses Hierarchical Memory
+# These choices can be varied for experimental comparison.
+
+extraction:
+  strategy: proposition_split   # later: llm_extract
+  min_atom_length: 12
+
+coarsening:
+  max_groups_per_level: 8
+  max_levels: 3
+  partition: keyword            # later: embedding_cluster | llm_cluster
+  represent: summary            # summary | label | centroid
+  level_criteria:
+    1: temporal_or_episodic
+    2: semantic_or_entity
+    3: thematic_or_skill
+
+traversal:
+  default_budget_tokens: 256
+  default_mode: top_down        # top_down | collapsed
+  session_primer_budget: 128
+
+storage:
+  backend: sqlite_fts5
+  path: senses_memory.db
