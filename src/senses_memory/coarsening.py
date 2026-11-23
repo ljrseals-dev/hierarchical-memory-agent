@@ -39,16 +39,20 @@ def partition_by_keyword(
         key = words[0] if words else "misc"
         buckets.setdefault(key, []).append(a)
 
-    items = sorted(buckets.items(), key=lambda kv: -len(kv[1]))
-    groups: Dict[int, List[Atom]] = {}
-    for i, (_, group) in enumerate(items[:max_groups]):
-        groups[i] = group
-    if len(items) > max_groups:
-        overflow: List[Atom] = []
-        for _, group in items[max_groups:]:
-            overflow.extend(group)
-        if overflow:
-            groups[len(groups)] = overflow
+    if max_groups < 1:
+        raise ValueError("max_groups must be at least 1")
+
+    items = sorted(buckets.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    if len(items) <= max_groups:
+        return {i: group for i, (_, group) in enumerate(items)}
+
+    # Keep the partition count within the requested bound. Fold overflow
+    # buckets into the final retained group instead of creating max_groups + 1.
+    groups: Dict[int, List[Atom]] = {
+        i: list(group) for i, (_, group) in enumerate(items[:max_groups])
+    }
+    for _, overflow_group in items[max_groups:]:
+        groups[max_groups - 1].extend(overflow_group)
     return groups
 
 
